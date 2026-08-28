@@ -7,19 +7,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import HfApi
-
-MODEL_ID = "zai-org/GLM-5.3"
-
-
-def get_sha256(sibling: Any) -> str | None:
-    lfs = getattr(sibling, "lfs", None)
-    if isinstance(lfs, dict):
-        return lfs.get("sha256")
-    if lfs is not None:
-        return getattr(lfs, "sha256", None)
-    return None
-
 
 def parse_assets(path: Path) -> dict[str, int]:
     assets: dict[str, int] = {}
@@ -28,14 +15,13 @@ def parse_assets(path: Path) -> dict[str, int]:
         for row in reader:
             if len(row) < 2:
                 continue
-            name, size = row[0], row[1]
-            assets[name] = int(size)
+            assets[row[0]] = int(row[1])
     return assets
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--revision", required=True)
+    parser.add_argument("--upstream-metadata", required=True)
     parser.add_argument("--assets-tsv", required=True)
     parser.add_argument("--manifests-dir", required=True)
     parser.add_argument("--output", required=True)
@@ -44,31 +30,27 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    api = HfApi()
-    info = api.model_info(
-        MODEL_ID,
-        revision=args.revision,
-        files_metadata=True,
+
+    metadata = json.loads(
+        Path(args.upstream_metadata).read_text(encoding="utf-8")
     )
-    if info.sha != args.revision:
-        raise SystemExit(
-            f"Revision mismatch: requested {args.revision}, resolved {info.sha}"
-        )
+    model_id = metadata["model_id"]
+    revision = metadata["revision"]
+    expected_files = metadata["files"]
+    expected = {item["path"]: item for item in expected_files}
 
-    siblings = sorted(info.siblings or [], key=lambda item: item.rfilename)
-    expected = {item.rfilename: item for item in siblings}
     assets = parse_assets(Path(args.assets_tsv))
-
     manifests_dir = Path(args.manifests_dir)
     manifests = sorted(manifests_dir.glob("manifest-*.json"))
+
     entries: dict[str, dict[str, Any]] = {}
     duplicate_paths: list[str] = []
 
     for manifest_path in manifests:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if data.get("model_id") != MODEL_ID:
+        if data.get("model_id") != model_id:
             raise SystemExit(f"Wrong model ID in {manifest_path}")
-        if data.get("revision") != args.revision:
+        if data.get("revision") != revision:
             raise SystemExit(f"Wrong revision in {manifest_path}")
         for entry in data.get("files", []):
             path = entry["path"]
@@ -85,6 +67,7 @@ def main() -> None:
         path for path in expected if path != "LICENSE" and path not in entries
     )
     unexpected_paths = sorted(path for path in entries if path not in expected)
+
     if missing_paths:
         raise SystemExit(
             f"Missing {len(missing_paths)} upstream files: "
@@ -97,38 +80,44 @@ def main() -> None:
 
     license_info = expected.get("LICENSE")
     if license_info is None:
-        raise SystemExit("Upstream LICENSE is missing")
+        raise SystemExit("Upstream LICENSE metadata is missing")
     if "LICENSE" not in assets:
         raise SystemExit("GitHub Release does not contain LICENSE")
-    if getattr(license_info, "size", None) is not None:
-        if assets["LICENSE"] != license_info.size:
+    if license_info.get("size") is not None:
+        if assets["LICENSE"] != license_info["size"]:
             raise SystemExit(
-                f"LICENSE size mismatch: expected {license_info.size}, "
+                f"LICENSE size mismatch: expected {license_info['size']}, "
                 f"got {assets['LICENSE']}"
             )
+
+    if "upstream-metadata.json" not in assets:
+        raise SystemExit("GitHub Release does not contain upstream-metadata.json")
 
     verified_bytes = assets["LICENSE"]
     verified_files = 1
     verified_parts = 0
+    sha256_checked_files = 0
 
-    for path, sibling in expected.items():
+    for path, expected_info in expected.items():
         if path == "LICENSE":
             continue
 
         entry = entries[path]
-        expected_size = getattr(sibling, "size", None)
+        expected_size = expected_info.get("size")
+
         if expected_size is not None and entry["size"] != expected_size:
             raise SystemExit(
                 f"Size mismatch for {path}: expected {expected_size}, "
                 f"manifest has {entry['size']}"
             )
 
-        upstream_sha = get_sha256(sibling)
+        upstream_sha = expected_info.get("sha256")
         if upstream_sha:
             if entry.get("upstream_sha256") != upstream_sha:
                 raise SystemExit(f"Upstream digest metadata mismatch for {path}")
             if entry.get("sha256") != upstream_sha:
                 raise SystemExit(f"Content SHA-256 mismatch for {path}")
+            sha256_checked_files += 1
 
         part_total = 0
         for part in entry["parts"]:
@@ -154,14 +143,16 @@ def main() -> None:
 
     result = {
         "status": "complete",
-        "model_id": MODEL_ID,
-        "revision": args.revision,
+        "model_id": model_id,
+        "revision": revision,
         "upstream_file_count": len(expected),
         "verified_file_count": verified_files,
         "verified_part_count": verified_parts,
         "verified_bytes": verified_bytes,
         "release_asset_count": len(assets),
         "license_present": True,
+        "upstream_metadata_present": True,
+        "sha256_checked_files": sha256_checked_files,
         "verification": {
             "all_upstream_paths_present": True,
             "release_part_sizes_match": True,
