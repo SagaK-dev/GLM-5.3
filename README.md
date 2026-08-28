@@ -1,16 +1,42 @@
 # GLM-5.3
 
-This repository is a lightweight, reproducible launcher for the official **Z.ai GLM-5.3** open-weights model.
+This repository provides a reproducible launcher and GitHub-mirroring toolchain for the official **Z.ai GLM-5.3** open-weights model.
 
 ## Official upstream
 
 - Model: `zai-org/GLM-5.3`
 - Upstream host: Hugging Face
 - Publisher: Z.ai
-- Model size: about 756 GB on the upstream repository
+- Approximate upstream size: ~756 GB
+- Weight layout: 141 safetensors shards, many around 5.36 GB each
 - License: custom `GLM-5.3 License`
 
-The model weights are **not vendored into this GitHub repository** because the upstream checkpoint is hundreds of gigabytes and is not suitable for ordinary GitHub storage. The scripts here pull the model directly from the official upstream source.
+## Important GitHub storage limitation
+
+The official weight files cannot be committed unchanged to an ordinary GitHub repository:
+
+- ordinary GitHub repositories reject files above 100 MiB;
+- Git LFS has per-file limits below the size of many official GLM-5.3 weight shards.
+
+For a complete GitHub-hosted mirror, this repository therefore uses **GitHub Releases**. Large upstream files are split into chunks smaller than 1.9 GB and can later be reconstructed byte-for-byte.
+
+See [MIRRORING.md](MIRRORING.md).
+
+The mirroring workflow is intentionally manual because a complete copy is hundreds of gigabytes and can have account, quota, Actions, and billing implications.
+
+## License / redistribution
+
+GLM-5.3 is © 2026 Z.AI and is distributed under the custom GLM-5.3 License.
+
+The license permits use, copying, modification, publication, distribution, sublicensing, selling copies, deployment, fine-tuning, and creation of derivative works, subject to its stated conditions.
+
+For redistribution, the Z.AI copyright notice and permission notice must be preserved. The mirror tooling therefore uploads the canonical upstream `LICENSE` file to every GitHub Release it creates.
+
+The license also contains a special condition for very large Model-as-a-Service businesses: if the licensee or affiliates operate such a business and their aggregate revenue exceeds the stated threshold over a consecutive 12-month period, Z.AI security review is required before commercial use.
+
+Always review the current canonical license before redistribution:
+
+https://huggingface.co/zai-org/GLM-5.3/blob/main/LICENSE
 
 ## Quick start
 
@@ -43,19 +69,17 @@ For SGLang serving:
 pip install sglang
 ```
 
-### 3. Check upstream metadata without downloading the weights
+### 3. Check upstream metadata without downloading weights
 
 ```bash
 python scripts/check_upstream.py
 ```
 
-### 4. Download the model only when you have enough storage
+### 4. Download the model locally
 
 ```bash
 python scripts/download_model.py --local-dir ./models/GLM-5.3 --confirm-large-download
 ```
-
-The script intentionally requires an explicit confirmation flag because the upstream repository is extremely large.
 
 ### 5. Serve with vLLM
 
@@ -63,22 +87,10 @@ The script intentionally requires an explicit confirmation flag because the upst
 bash scripts/serve_vllm.sh
 ```
 
-Default endpoint:
-
-```text
-http://localhost:8000/v1/chat/completions
-```
-
 ### 6. Serve with SGLang
 
 ```bash
 bash scripts/serve_sglang.sh
-```
-
-Default endpoint:
-
-```text
-http://localhost:30000/v1/chat/completions
 ```
 
 ## Direct Transformers example
@@ -89,18 +101,15 @@ python examples/chat_transformers.py
 
 This may download the full checkpoint if it is not already cached.
 
-## Reasoning effort
+## Full GitHub mirror tooling
 
-GLM-5.3 supports `low`, `high`, and `max` reasoning effort. The official model card states that the default is `max`.
+The repository now contains:
+
+- `.github/workflows/mirror-release.yml` — manual range-based mirror workflow;
+- `scripts/mirror_release_assets.py` — streams official upstream files and uploads split GitHub Release assets;
+- `scripts/restore_release_file.py` — reconstructs the original files and verifies SHA-256;
+- `MIRRORING.md` — operational and licensing notes.
 
 ## Repository policy
 
-This repository does not claim authorship of GLM-5.3. Model weights, architecture assets, upstream configuration, and the GLM-5.3 license belong to their respective upstream rights holders.
-
-Do not replace the upstream model identifier with unofficial mirrors unless you have independently verified their provenance.
-
-## License notice
-
-GLM-5.3 is distributed by Z.ai under the custom GLM-5.3 License. Review the official license before redistribution, commercial deployment, or offering the model as a service.
-
-This repository's helper scripts are provided for reproducible access to the official upstream model.
+This repository does not claim authorship of GLM-5.3. Model weights, architecture assets, upstream configuration, and upstream license rights remain attributable to Z.AI and the relevant upstream rights holders.
