@@ -1,0 +1,43 @@
+name: Mirror upstream to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First sorted upstream file index"
+        required: true
+        default: "0"
+      end:
+        description: "Last sorted upstream file index"
+        required: true
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glm53-release-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mirror dependencies
+        run: python -m pip install --upgrade huggingface_hub requests
+
+      - name: Confirm GitHub CLI
+        run: gh --version
+
+      - name: Mirror selected upstream files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/mirror_release_assets.py             --start "${{ inputs.start }}"             --end "${{ inputs.end }}"
