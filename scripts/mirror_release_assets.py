@@ -164,6 +164,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, required=True)
     parser.add_argument("--tag-prefix", default="upstream")
+    parser.add_argument(
+        "--revision",
+        default=None,
+        help="Pin an exact upstream revision SHA. Defaults to current upstream.",
+    )
+    parser.add_argument(
+        "--skip-license",
+        action="store_true",
+        help="Do not upload LICENSE; useful when a prepare job already did it.",
+    )
     return parser.parse_args()
 
 
@@ -173,10 +183,19 @@ def main() -> None:
         raise SystemExit("Invalid start/end range")
 
     api = HfApi()
-    info = api.model_info(MODEL_ID, files_metadata=True)
+    info = api.model_info(
+        MODEL_ID,
+        revision=args.revision,
+        files_metadata=True,
+    )
     revision = info.sha
     if not revision:
         raise SystemExit("Upstream revision SHA is unavailable")
+
+    if args.revision and revision != args.revision:
+        raise SystemExit(
+            f"Resolved revision mismatch: requested {args.revision}, got {revision}"
+        )
 
     siblings = sorted(info.siblings or [], key=lambda item: item.rfilename)
     if args.end >= len(siblings):
@@ -186,7 +205,8 @@ def main() -> None:
 
     tag = f"{args.tag_prefix}-{revision[:12]}"
     ensure_release(tag, revision)
-    ensure_upstream_license(tag, revision)
+    if not args.skip_license:
+        ensure_upstream_license(tag, revision)
 
     entries: list[dict[str, Any]] = []
     for index in range(args.start, args.end + 1):
@@ -195,7 +215,7 @@ def main() -> None:
 
         if path == "LICENSE":
             print(
-                f"[{index}/{len(siblings)-1}] LICENSE already uploaded",
+                f"[{index}/{len(siblings)-1}] LICENSE handled separately",
                 flush=True,
             )
             continue
