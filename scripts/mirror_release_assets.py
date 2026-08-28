@@ -6,19 +6,57 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 import requests
 from huggingface_hub import HfApi, hf_hub_url
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 MODEL_ID = "zai-org/GLM-5.3"
 PART_SIZE = 1_900_000_000
 BUFFER_SIZE = 8 * 1024 * 1024
 
 
-def run(*args: str) -> None:
-    subprocess.run(args, check=True)
+def run_with_retry(*args: str, attempts: int = 6) -> None:
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(args, check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise
+            delay = min(60, 2 ** attempt)
+            print(
+                f"Command failed (attempt {attempt}/{attempts}); "
+                f"retrying in {delay}s: {' '.join(args[:4])}",
+                flush=True,
+            )
+            time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+
+
+def build_session() -> requests.Session:
+    retry = Retry(
+        total=8,
+        connect=8,
+        read=3,
+        status=8,
+        backoff_factor=2.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
 
 
 def asset_name(path: str, part: int | None = None) -> str:
@@ -38,7 +76,7 @@ def get_sha256(sibling: Any) -> str | None:
 
 
 def upload(tag: str, path: Path) -> None:
-    run("gh", "release", "upload", tag, str(path), "--clobber")
+    run_with_retry("gh", "release", "upload", tag, str(path), "--clobber")
 
 
 def ensure_release(tag: str, revision: str) -> None:
@@ -49,7 +87,7 @@ def ensure_release(tag: str, revision: str) -> None:
     )
     if result.returncode == 0:
         return
-    run(
+    run_with_retry(
         "gh",
         "release",
         "create",
@@ -68,7 +106,8 @@ def ensure_release(tag: str, revision: str) -> None:
 
 def ensure_upstream_license(tag: str, revision: str) -> None:
     url = hf_hub_url(repo_id=MODEL_ID, filename="LICENSE", revision=revision)
-    with requests.get(url, stream=True, timeout=(30, 300)) as response:
+    session = build_session()
+    with session.get(url, stream=True, timeout=(30, 300)) as response:
         response.raise_for_status()
         with tempfile.TemporaryDirectory(prefix="glm53-license-") as tmp:
             path = Path(tmp) / "LICENSE"
@@ -77,6 +116,29 @@ def ensure_upstream_license(tag: str, revision: str) -> None:
                     if chunk:
                         out.write(chunk)
             upload(tag, path)
+
+
+def manifest_name(start: int, end: int, revision: str) -> str:
+    return f"manifest-{start:04d}-{end:04d}-{revision[:12]}.json"
+
+
+def manifest_exists(tag: str, name: str) -> bool:
+    with tempfile.TemporaryDirectory(prefix="glm53-manifest-check-") as tmp:
+        result = subprocess.run(
+            [
+                "gh",
+                "release",
+                "download",
+                tag,
+                "--pattern",
+                name,
+                "--dir",
+                tmp,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0 and (Path(tmp) / name).is_file()
 
 
 def stream_one(
@@ -91,8 +153,9 @@ def stream_one(
     full_hash = hashlib.sha256()
     total = 0
     parts: list[dict[str, Any]] = []
+    session = build_session()
 
-    with requests.get(url, stream=True, timeout=(30, 300)) as response:
+    with session.get(url, stream=True, timeout=(30, 300)) as response:
         response.raise_for_status()
 
         with tempfile.TemporaryDirectory(prefix="glm53-mirror-") as tmp:
@@ -174,6 +237,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not upload LICENSE; useful when a prepare job already did it.",
     )
+    parser.add_argument(
+        "--path",
+        default=None,
+        help="Directly mirror one pinned upstream path without querying model_info.",
+    )
+    parser.add_argument("--expected-size", type=int, default=None)
+    parser.add_argument("--expected-sha256", default=None)
     return parser.parse_args()
 
 
@@ -181,6 +251,50 @@ def main() -> None:
     args = parse_args()
     if args.start < 0 or args.end < args.start:
         raise SystemExit("Invalid start/end range")
+
+    if args.path:
+        if not args.revision:
+            raise SystemExit("--revision is required when --path is used")
+        revision = args.revision
+        tag = f"{args.tag_prefix}-{revision[:12]}"
+        ensure_release(tag, revision)
+        if not args.skip_license:
+            ensure_upstream_license(tag, revision)
+
+        name = manifest_name(args.start, args.end, revision)
+        if manifest_exists(tag, name):
+            print(
+                f"Already complete, skipping {args.path}; found {name}",
+                flush=True,
+            )
+            return
+
+        if args.path == "LICENSE":
+            print("LICENSE is handled separately", flush=True)
+            return
+
+        entry = stream_one(
+            path=args.path,
+            revision=revision,
+            tag=tag,
+            expected_size=args.expected_size,
+            expected_sha256=args.expected_sha256 or None,
+        )
+        manifest = {
+            "model_id": MODEL_ID,
+            "revision": revision,
+            "range": {"start": args.start, "end": args.end},
+            "part_size": PART_SIZE,
+            "files": [entry],
+        }
+        manifest_path = Path(name)
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        upload(tag, manifest_path)
+        print(f"Uploaded manifest to release {tag}: {name}")
+        return
 
     api = HfApi()
     info = api.model_info(
@@ -207,6 +321,11 @@ def main() -> None:
     ensure_release(tag, revision)
     if not args.skip_license:
         ensure_upstream_license(tag, revision)
+
+    name = manifest_name(args.start, args.end, revision)
+    if manifest_exists(tag, name):
+        print(f"Already complete, skipping range; found {name}", flush=True)
+        return
 
     entries: list[dict[str, Any]] = []
     for index in range(args.start, args.end + 1):
@@ -239,10 +358,7 @@ def main() -> None:
         "files": entries,
     }
 
-    manifest_name = (
-        f"manifest-{args.start:04d}-{args.end:04d}-{revision[:12]}.json"
-    )
-    manifest_path = Path(manifest_name)
+    manifest_path = Path(name)
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
