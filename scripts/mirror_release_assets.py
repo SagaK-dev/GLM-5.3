@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -38,8 +37,8 @@ def get_sha256(sibling: Any) -> str | None:
     return None
 
 
-def upload(tag: str, path: Path, name: str) -> None:
-    run("gh", "release", "upload", tag, f"{path}#{name}", "--clobber")
+def upload(tag: str, path: Path) -> None:
+    run("gh", "release", "upload", tag, str(path), "--clobber")
 
 
 def ensure_release(tag: str, revision: str) -> None:
@@ -61,9 +60,23 @@ def ensure_release(tag: str, revision: str) -> None:
         (
             "Byte-preserving mirror assets for the official zai-org/GLM-5.3 "
             f"revision {revision}. Large files are split into <1.9 GB parts. "
-            "See MIRRORING.md and the uploaded manifest."
+            "The official upstream LICENSE is included as a release asset. "
+            "See MIRRORING.md and the uploaded manifests."
         ),
     )
+
+
+def ensure_upstream_license(tag: str, revision: str) -> None:
+    url = hf_hub_url(repo_id=MODEL_ID, filename="LICENSE", revision=revision)
+    with requests.get(url, stream=True, timeout=(30, 300)) as response:
+        response.raise_for_status()
+        with tempfile.TemporaryDirectory(prefix="glm53-license-") as tmp:
+            path = Path(tmp) / "LICENSE"
+            with path.open("wb") as out:
+                for chunk in response.iter_content(chunk_size=BUFFER_SIZE):
+                    if chunk:
+                        out.write(chunk)
+            upload(tag, path)
 
 
 def stream_one(
@@ -85,7 +98,8 @@ def stream_one(
         with tempfile.TemporaryDirectory(prefix="glm53-mirror-") as tmp:
             tmpdir = Path(tmp)
             part_no = 1
-            current_path = tmpdir / f"part-{part_no:04d}"
+            current_name = asset_name(path, part_no)
+            current_path = tmpdir / current_name
             current = current_path.open("wb")
             current_size = 0
 
@@ -105,12 +119,15 @@ def stream_one(
 
                         if current_size == PART_SIZE:
                             current.close()
-                            name = asset_name(path, part_no)
-                            upload(tag, current_path, name)
-                            parts.append({"name": name, "size": current_size})
+                            upload(tag, current_path)
+                            parts.append(
+                                {"name": current_name, "size": current_size}
+                            )
                             current_path.unlink(missing_ok=True)
+
                             part_no += 1
-                            current_path = tmpdir / f"part-{part_no:04d}"
+                            current_name = asset_name(path, part_no)
+                            current_path = tmpdir / current_name
                             current = current_path.open("wb")
                             current_size = 0
             finally:
@@ -118,9 +135,8 @@ def stream_one(
                     current.close()
 
             if current_size:
-                name = asset_name(path, part_no)
-                upload(tag, current_path, name)
-                parts.append({"name": name, "size": current_size})
+                upload(tag, current_path)
+                parts.append({"name": current_name, "size": current_size})
                 current_path.unlink(missing_ok=True)
 
     actual_sha256 = full_hash.hexdigest()
@@ -170,11 +186,20 @@ def main() -> None:
 
     tag = f"{args.tag_prefix}-{revision[:12]}"
     ensure_release(tag, revision)
+    ensure_upstream_license(tag, revision)
 
     entries: list[dict[str, Any]] = []
     for index in range(args.start, args.end + 1):
         sibling = siblings[index]
         path = sibling.rfilename
+
+        if path == "LICENSE":
+            print(
+                f"[{index}/{len(siblings)-1}] LICENSE already uploaded",
+                flush=True,
+            )
+            continue
+
         print(f"[{index}/{len(siblings)-1}] mirroring {path}", flush=True)
         entries.append(
             stream_one(
@@ -194,14 +219,15 @@ def main() -> None:
         "files": entries,
     }
 
-    manifest_path = Path(
+    manifest_name = (
         f"manifest-{args.start:04d}-{args.end:04d}-{revision[:12]}.json"
     )
+    manifest_path = Path(manifest_name)
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    upload(tag, manifest_path, manifest_path.name)
+    upload(tag, manifest_path)
     print(f"Uploaded manifest to release {tag}: {manifest_path.name}")
 
 
