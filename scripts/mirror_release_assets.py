@@ -16,7 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 MODEL_ID = "zai-org/GLM-5.3"
-PART_SIZE = 1_900_000_000
+PART_SIZE = 1_500_000_000
 BUFFER_SIZE = 8 * 1024 * 1024
 
 
@@ -141,6 +141,83 @@ def manifest_exists(tag: str, name: str) -> bool:
         return result.returncode == 0 and (Path(tmp) / name).is_file()
 
 
+def download_range(
+    *,
+    session: requests.Session,
+    url: str,
+    start: int,
+    end: int,
+    destination: Path,
+    attempts: int = 8,
+) -> int:
+    expected = end - start + 1
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        destination.unlink(missing_ok=True)
+        received = 0
+        try:
+            headers = {
+                "Range": f"bytes={start}-{end}",
+                "Accept-Encoding": "identity",
+            }
+            with session.get(
+                url,
+                headers=headers,
+                stream=True,
+                timeout=(30, 300),
+            ) as response:
+                if response.status_code == 206:
+                    content_range = response.headers.get("Content-Range", "")
+                    expected_prefix = f"bytes {start}-{end}/"
+                    if not content_range.startswith(expected_prefix):
+                        raise RuntimeError(
+                            f"Unexpected Content-Range for {start}-{end}: "
+                            f"{content_range!r}"
+                        )
+                elif response.status_code == 200 and start == 0:
+                    content_length = response.headers.get("Content-Length")
+                    if content_length and int(content_length) != expected:
+                        raise RuntimeError(
+                            "Server ignored Range and returned a different "
+                            f"Content-Length: {content_length} != {expected}"
+                        )
+                else:
+                    response.raise_for_status()
+                    raise RuntimeError(
+                        f"Server ignored Range request: HTTP {response.status_code}"
+                    )
+
+                with destination.open("wb") as out:
+                    for chunk in response.iter_content(chunk_size=BUFFER_SIZE):
+                        if not chunk:
+                            continue
+                        out.write(chunk)
+                        received += len(chunk)
+
+            if received != expected:
+                raise RuntimeError(
+                    f"Incomplete range {start}-{end}: "
+                    f"expected {expected} bytes, received {received}"
+                )
+            return received
+        except Exception as exc:
+            last_error = exc
+            destination.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            delay = min(60, 2 ** attempt)
+            print(
+                f"Range {start}-{end} failed "
+                f"(attempt {attempt}/{attempts}): {exc}; "
+                f"retrying in {delay}s",
+                flush=True,
+            )
+            time.sleep(delay)
+
+    raise last_error or RuntimeError("Range download failed")
+
+
 def stream_one(
     *,
     path: str,
@@ -155,55 +232,48 @@ def stream_one(
     parts: list[dict[str, Any]] = []
     session = build_session()
 
-    with session.get(url, stream=True, timeout=(30, 300)) as response:
-        response.raise_for_status()
+    if expected_size is None:
+        raise RuntimeError(
+            f"Expected size is required for range-safe mirroring: {path}"
+        )
 
-        with tempfile.TemporaryDirectory(prefix="glm53-mirror-") as tmp:
-            tmpdir = Path(tmp)
-            part_no = 1
+    with tempfile.TemporaryDirectory(prefix="glm53-mirror-") as tmp:
+        tmpdir = Path(tmp)
+
+        part_no = 1
+        for start in range(0, expected_size, PART_SIZE):
+            end = min(start + PART_SIZE, expected_size) - 1
             current_name = asset_name(path, part_no)
             current_path = tmpdir / current_name
-            current = current_path.open("wb")
-            current_size = 0
 
-            try:
-                for chunk in response.iter_content(chunk_size=BUFFER_SIZE):
-                    if not chunk:
-                        continue
-                    offset = 0
-                    while offset < len(chunk):
-                        remaining = PART_SIZE - current_size
-                        piece = chunk[offset : offset + remaining]
-                        current.write(piece)
-                        full_hash.update(piece)
-                        current_size += len(piece)
-                        total += len(piece)
-                        offset += len(piece)
+            print(
+                f"{path}: downloading bytes {start}-{end} "
+                f"({end - start + 1} bytes)",
+                flush=True,
+            )
+            received = download_range(
+                session=session,
+                url=url,
+                start=start,
+                end=end,
+                destination=current_path,
+            )
 
-                        if current_size == PART_SIZE:
-                            current.close()
-                            upload(tag, current_path)
-                            parts.append(
-                                {"name": current_name, "size": current_size}
-                            )
-                            current_path.unlink(missing_ok=True)
+            with current_path.open("rb") as src:
+                while True:
+                    block = src.read(BUFFER_SIZE)
+                    if not block:
+                        break
+                    full_hash.update(block)
 
-                            part_no += 1
-                            current_name = asset_name(path, part_no)
-                            current_path = tmpdir / current_name
-                            current = current_path.open("wb")
-                            current_size = 0
-            finally:
-                if not current.closed:
-                    current.close()
-
-            if current_size:
-                upload(tag, current_path)
-                parts.append({"name": current_name, "size": current_size})
-                current_path.unlink(missing_ok=True)
+            upload(tag, current_path)
+            parts.append({"name": current_name, "size": received})
+            total += received
+            current_path.unlink(missing_ok=True)
+            part_no += 1
 
     actual_sha256 = full_hash.hexdigest()
-    if expected_size is not None and total != expected_size:
+    if total != expected_size:
         raise RuntimeError(
             f"Size mismatch for {path}: expected {expected_size}, got {total}"
         )
