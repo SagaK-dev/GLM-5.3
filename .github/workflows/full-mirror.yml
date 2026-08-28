@@ -1,0 +1,185 @@
+name: Full GLM-5.3 mirror
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".mirror/full-transfer.trigger"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glm53-full-mirror
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.meta.outputs.revision }}
+      indices: ${{ steps.meta.outputs.indices }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install metadata dependency
+        run: python -m pip install --upgrade huggingface_hub requests
+
+      - name: Resolve and pin upstream revision
+        id: meta
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from huggingface_hub import HfApi
+
+          model_id = "zai-org/GLM-5.3"
+          info = HfApi().model_info(model_id, files_metadata=True)
+          siblings = sorted(info.siblings or [], key=lambda item: item.rfilename)
+          revision = info.sha
+          if not revision:
+              raise SystemExit("Unable to resolve upstream revision")
+
+          indices = [
+              index
+              for index, item in enumerate(siblings)
+              if item.rfilename != "LICENSE"
+          ]
+          if len(indices) > 256:
+              raise SystemExit(
+                  f"Matrix would contain {len(indices)} jobs; GitHub maximum is 256"
+              )
+
+          print(f"revision={revision}")
+          print(f"tag=upstream-{revision[:12]}")
+          print("indices=" + json.dumps(indices, separators=(",", ":")))
+          PY
+
+      - name: Create pinned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ steps.meta.outputs.revision }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG"               --target "${{ github.sha }}"               --title "GLM-5.3 upstream mirror ${REVISION:0:12}"               --notes "Full byte-preserving mirror of zai-org/GLM-5.3 at revision $REVISION. Large upstream files are split into <1.9 GB assets. Official LICENSE is included."
+          fi
+
+      - name: Upload official upstream LICENSE
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ steps.meta.outputs.revision }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+
+          path = hf_hub_download(
+              repo_id="zai-org/GLM-5.3",
+              filename="LICENSE",
+              revision=os.environ["REVISION"],
+              local_dir="license-download",
+          )
+          print(path)
+          PY
+          cp license-download/LICENSE LICENSE
+          gh release upload "$TAG" LICENSE --clobber
+
+  mirror:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        index: ${{ fromJSON(needs.prepare.outputs.indices) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mirror dependencies
+        run: python -m pip install --upgrade huggingface_hub requests
+
+      - name: Transfer pinned upstream file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          INDEX: ${{ matrix.index }}
+        run: |
+          python scripts/mirror_release_assets.py             --start "$INDEX"             --end "$INDEX"             --revision "$REVISION"             --skip-license
+
+  verify:
+    needs:
+      - prepare
+      - mirror
+    if: ${{ always() && needs.mirror.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install verification dependency
+        run: python -m pip install --upgrade huggingface_hub
+
+      - name: Download all per-file manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          mkdir -p release-manifests
+          gh release download "$TAG"             --pattern "manifest-*.json"             --dir release-manifests
+
+      - name: Inventory every release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          RELEASE_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.id')"
+          gh api --paginate             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100"             --jq '.[] | [.name, .size] | @tsv'             > release-assets.tsv
+          wc -l release-assets.tsv
+
+      - name: Verify full mirror against pinned upstream
+        env:
+          REVISION: ${{ needs.prepare.outputs.revision }}
+        run: |
+          python scripts/verify_release_mirror.py             --revision "$REVISION"             --assets-tsv release-assets.tsv             --manifests-dir release-manifests             --output MIRROR_STATUS.json
+
+      - name: Record verified completion on main
+        env:
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          {
+            echo "# GLM-5.3 mirror complete"
+            echo
+            echo "Upstream: zai-org/GLM-5.3"
+            echo
+            echo "Revision: $REVISION"
+            echo
+            echo "Release tag: $TAG"
+            echo
+            echo "The full upstream file set has been verified against the release manifests."
+          } > MIRROR_COMPLETE.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MIRROR_STATUS.json MIRROR_COMPLETE.md
+          git commit -m "Record complete verified GLM-5.3 mirror"
+          git pull --rebase origin main
+          git push origin HEAD:main
