@@ -1,0 +1,19 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+
+# Model checkpoints are intentionally not stored in GitHub.
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+
+# Hugging Face caches
+.cache/
+huggingface/
