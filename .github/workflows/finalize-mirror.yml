@@ -111,7 +111,7 @@ jobs:
           echo "Missing upstream files: ${{ steps.count.outputs.missing_all_json }}"
           exit 0
 
-      - name: Repair legacy dotfile release asset names
+      - name: Normalize legacy dotfile manifest asset references
         if: steps.count.outputs.missing_all_count == '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -121,6 +121,7 @@ jobs:
           import json
           import os
           import subprocess
+          from pathlib import Path
 
           repo = os.environ["GITHUB_REPOSITORY"]
           tag = os.environ["MIRROR_TAG"]
@@ -143,7 +144,6 @@ jobs:
               text=True,
           )
 
-          # gh --paginate emits one JSON array per page.
           assets = []
           decoder = json.JSONDecoder()
           pos = 0
@@ -155,44 +155,61 @@ jobs:
               page, pos = decoder.raw_decode(raw, pos)
               assets.extend(page)
 
-          by_name = {item["name"]: item for item in assets}
-          legacy = [
-              item
-              for item in assets
-              if item["name"].startswith("default.")
-          ]
+          asset_names = {item["name"] for item in assets}
+          changed = []
 
-          for item in legacy:
-              old = item["name"]
-              new = old[len("default"):]
-              if not new.startswith("."):
-                  raise SystemExit(
-                      f"Refusing unexpected legacy rename: {old} -> {new}"
-                  )
+          for manifest_path in sorted(
+              Path("release-manifests").glob("manifest-*.json")
+          ):
+              data = json.loads(
+                  manifest_path.read_text(encoding="utf-8")
+              )
+              dirty = False
 
-              existing = by_name.get(new)
-              if existing:
-                  if existing["size"] != item["size"]:
-                      raise SystemExit(
-                          f"Conflicting target asset {new}: "
-                          f"{existing['size']} != {item['size']}"
+              for entry in data.get("files", []):
+                  for part in entry.get("parts", []):
+                      name = part.get("name", "")
+                      if not name.startswith("."):
+                          continue
+
+                      # GitHub Release normalizes a leading-dot asset name
+                      # such as ".gitattributes.part0001" to
+                      # "default.gitattributes.part0001".
+                      normalized = "default" + name
+                      if name in asset_names:
+                          continue
+                      if normalized not in asset_names:
+                          raise SystemExit(
+                              f"Neither {name} nor {normalized} exists "
+                              f"for {entry.get('path')}"
+                          )
+
+                      print(
+                          f"Normalizing manifest reference "
+                          f"{name} -> {normalized}"
                       )
-                  print(
-                      f"Target {new} already exists with matching size; "
-                      f"leaving legacy {old} unchanged."
-                  )
-                  continue
+                      part["name"] = normalized
+                      dirty = True
 
-              print(f"Renaming release asset {old} -> {new}")
+              if dirty:
+                  manifest_path.write_text(
+                      json.dumps(data, indent=2, sort_keys=True) + "\n",
+                      encoding="utf-8",
+                  )
+                  changed.append(manifest_path)
+
+          for manifest_path in changed:
+              print(
+                  f"Updating release manifest {manifest_path.name}"
+              )
               subprocess.run(
                   [
                       "gh",
-                      "api",
-                      "--method",
-                      "PATCH",
-                      f"repos/{repo}/releases/assets/{item['id']}",
-                      "-f",
-                      f"name={new}",
+                      "release",
+                      "upload",
+                      tag,
+                      str(manifest_path),
+                      "--clobber",
                   ],
                   check=True,
               )
