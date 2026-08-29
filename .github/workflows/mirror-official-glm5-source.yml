@@ -1,0 +1,94 @@
+name: Mirror official Z.ai GLM-5 source
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".mirror/official-glm5-source.trigger"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: official-zai-glm5-source
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPO: "https://github.com/zai-org/GLM-5.git"
+  UPSTREAM_COMMIT: "414ad9eb891b05b5d7d51d573939bfe9ce538223"
+  TARGET_DIR: "official-source/zai-org-GLM-5"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch exact official source revision
+        run: |
+          rm -rf /tmp/zai-glm5
+          git clone --no-checkout "$UPSTREAM_REPO" /tmp/zai-glm5
+          git -C /tmp/zai-glm5 checkout --detach "$UPSTREAM_COMMIT"
+          test "$(git -C /tmp/zai-glm5 rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+
+      - name: Replace vendored source tree byte-for-byte
+        run: |
+          rm -rf "$TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+          rsync -a --exclude=".git" /tmp/zai-glm5/ "$TARGET_DIR"/
+          printf '%s\n' "$UPSTREAM_COMMIT" > "$TARGET_DIR/UPSTREAM_COMMIT.txt"
+          cat > "$TARGET_DIR/UPSTREAM_REPOSITORY.txt" <<'EOF'
+          https://github.com/zai-org/GLM-5
+          EOF
+
+      - name: Verify official source tree
+        run: |
+          python - <<'PY'
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          upstream = Path("/tmp/zai-glm5")
+          target = Path("official-source/zai-org-GLM-5")
+
+          upstream_files = sorted(
+              p.relative_to(upstream).as_posix()
+              for p in upstream.rglob("*")
+              if p.is_file() and ".git" not in p.parts
+          )
+          target_files = sorted(
+              p.relative_to(target).as_posix()
+              for p in target.rglob("*")
+              if p.is_file()
+              and p.name not in {"UPSTREAM_COMMIT.txt", "UPSTREAM_REPOSITORY.txt"}
+          )
+
+          if upstream_files != target_files:
+              raise SystemExit("Vendored file list differs from official upstream")
+
+          for rel in upstream_files:
+              a = upstream / rel
+              b = target / rel
+              ha = hashlib.sha256(a.read_bytes()).hexdigest()
+              hb = hashlib.sha256(b.read_bytes()).hexdigest()
+              if ha != hb:
+                  raise SystemExit(f"SHA-256 mismatch: {rel}")
+
+          print(f"Verified {len(upstream_files)} official source files")
+          PY
+
+      - name: Commit official source mirror
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$TARGET_DIR"
+          if git diff --cached --quiet; then
+            echo "Official source already mirrored."
+            exit 0
+          fi
+          git commit -m "Mirror official Z.ai GLM-5 source at 414ad9eb"
+          git pull --rebase origin main
+          git push origin HEAD:main
