@@ -111,6 +111,93 @@ jobs:
           echo "Missing upstream files: ${{ steps.count.outputs.missing_all_json }}"
           exit 0
 
+      - name: Repair legacy dotfile release asset names
+        if: steps.count.outputs.missing_all_count == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["MIRROR_TAG"]
+
+          release = json.loads(
+              subprocess.check_output(
+                  ["gh", "api", f"repos/{repo}/releases/tags/{tag}"],
+                  text=True,
+              )
+          )
+          release_id = release["id"]
+
+          raw = subprocess.check_output(
+              [
+                  "gh",
+                  "api",
+                  "--paginate",
+                  f"repos/{repo}/releases/{release_id}/assets?per_page=100",
+              ],
+              text=True,
+          )
+
+          # gh --paginate emits one JSON array per page.
+          assets = []
+          decoder = json.JSONDecoder()
+          pos = 0
+          while pos < len(raw):
+              while pos < len(raw) and raw[pos].isspace():
+                  pos += 1
+              if pos >= len(raw):
+                  break
+              page, pos = decoder.raw_decode(raw, pos)
+              assets.extend(page)
+
+          by_name = {item["name"]: item for item in assets}
+          legacy = [
+              item
+              for item in assets
+              if item["name"].startswith("default.")
+          ]
+
+          for item in legacy:
+              old = item["name"]
+              new = old[len("default"):]
+              if not new.startswith("."):
+                  raise SystemExit(
+                      f"Refusing unexpected legacy rename: {old} -> {new}"
+                  )
+
+              existing = by_name.get(new)
+              if existing:
+                  if existing["size"] != item["size"]:
+                      raise SystemExit(
+                          f"Conflicting target asset {new}: "
+                          f"{existing['size']} != {item['size']}"
+                      )
+                  print(
+                      f"Target {new} already exists with matching size; "
+                      f"leaving legacy {old} unchanged."
+                  )
+                  continue
+
+              print(f"Renaming release asset {old} -> {new}")
+              subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      "--method",
+                      "PATCH",
+                      f"repos/{repo}/releases/assets/{item['id']}",
+                      "-f",
+                      f"name={new}",
+                  ],
+                  check=True,
+              )
+          PY
+
       - name: Inventory release assets
         if: steps.count.outputs.missing_all_count == '0'
         env:
