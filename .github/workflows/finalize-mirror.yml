@@ -1,0 +1,150 @@
+name: Finalize GLM-5.3 mirror
+
+on:
+  workflow_run:
+    workflows:
+      - "Full GLM-5.3 mirror"
+      - "GLM-5.3 mirror accelerator high"
+      - "GLM-5.3 mirror accelerator mid"
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glm53-finalizer
+  cancel-in-progress: true
+
+env:
+  MIRROR_TAG: "upstream-935644c05e76"
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download pinned metadata and manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf release-manifests
+          mkdir -p release-manifests
+
+          gh release download "$MIRROR_TAG"             --pattern "upstream-metadata.json"             --dir .
+
+          gh release download "$MIRROR_TAG"             --pattern "manifest-*.json"             --dir release-manifests
+
+      - name: Count completed model shards
+        id: count
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+          from pathlib import Path
+
+          metadata = json.load(open("upstream-metadata.json", encoding="utf-8"))
+          files = metadata["files"]
+
+          manifests = list(Path("release-manifests").glob("manifest-*.json"))
+          completed_paths = set()
+          for p in manifests:
+              data = json.load(open(p, encoding="utf-8"))
+              if data.get("revision") != metadata["revision"]:
+                  continue
+              for entry in data.get("files", []):
+                  completed_paths.add(entry["path"])
+
+          model_paths = [
+              item["path"]
+              for item in files
+              if re.fullmatch(r"model-\d{5}-of-00141\.safetensors", item["path"])
+          ]
+          missing_models = [p for p in model_paths if p not in completed_paths]
+          missing_all = [
+              item["path"]
+              for item in files
+              if item["path"] != "LICENSE" and item["path"] not in completed_paths
+          ]
+
+          print(f"model_count={len(model_paths)}")
+          print(f"completed_model_count={len(model_paths)-len(missing_models)}")
+          print(f"missing_model_count={len(missing_models)}")
+          print(f"missing_all_count={len(missing_all)}")
+          print("missing_models_json=" + json.dumps(missing_models,separators=(",",":")))
+          print("missing_all_json=" + json.dumps(missing_all,separators=(",",":")))
+
+          summary = {
+              "model_count": len(model_paths),
+              "completed_model_count": len(model_paths)-len(missing_models),
+              "missing_model_count": len(missing_models),
+              "missing_models": missing_models,
+              "missing_all_count": len(missing_all),
+              "missing_all": missing_all,
+          }
+          Path("MIRROR_PROGRESS.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Stop until everything is present
+        if: steps.count.outputs.missing_all_count != '0'
+        run: |
+          echo "Mirror is not complete yet."
+          echo "Completed model shards: ${{ steps.count.outputs.completed_model_count }}/${{ steps.count.outputs.model_count }}"
+          echo "Missing model shards: ${{ steps.count.outputs.missing_models_json }}"
+          echo "Missing upstream files: ${{ steps.count.outputs.missing_all_json }}"
+          exit 0
+
+      - name: Inventory release assets
+        if: steps.count.outputs.missing_all_count == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$MIRROR_TAG" --jq '.id')"
+          gh api --paginate             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100"             --jq '.[] | [.name, .size] | @tsv'             > release-assets.tsv
+
+      - name: Verify complete mirror
+        if: steps.count.outputs.missing_all_count == '0'
+        run: |
+          python scripts/verify_release_mirror.py             --upstream-metadata upstream-metadata.json             --assets-tsv release-assets.tsv             --manifests-dir release-manifests             --output MIRROR_STATUS.json
+
+      - name: Commit verified completion
+        if: steps.count.outputs.missing_all_count == '0'
+        env:
+          REVISION: "935644c05e76fc198714f4cca449fd8b970ff6d7"
+        run: |
+          {
+            echo "# GLM-5.3 mirror complete"
+            echo
+            echo "Upstream: zai-org/GLM-5.3"
+            echo
+            echo "Revision: $REVISION"
+            echo
+            echo "Release tag: $MIRROR_TAG"
+            echo
+            echo "All 141 model shards and all other upstream files were verified."
+          } > MIRROR_COMPLETE.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MIRROR_STATUS.json MIRROR_COMPLETE.md
+
+          if git diff --cached --quiet; then
+            echo "Completion status already recorded."
+            exit 0
+          fi
+
+          git commit -m "Record verified complete GLM-5.3 mirror"
+          git pull --rebase origin main
+          git push origin HEAD:main
