@@ -15,7 +15,7 @@ from huggingface_hub import HfApi, hf_hub_url
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-MODEL_ID = "zai-org/GLM-5.3"
+DEFAULT_MODEL_ID = "zai-org/GLM-5.3"
 PART_SIZE = 1_500_000_000
 BUFFER_SIZE = 8 * 1024 * 1024
 
@@ -144,7 +144,7 @@ def upload(tag: str, path: Path, attempts: int = 6) -> None:
         raise last_error
 
 
-def ensure_release(tag: str, revision: str) -> None:
+def ensure_release(tag: str, revision: str, model_id: str) -> None:
     result = subprocess.run(
         ["gh", "release", "view", tag],
         stdout=subprocess.DEVNULL,
@@ -158,19 +158,23 @@ def ensure_release(tag: str, revision: str) -> None:
         "create",
         tag,
         "--title",
-        f"GLM-5.3 upstream mirror {revision[:12]}",
+        f"{model_id.split('/')[-1]} upstream mirror {revision[:12]}",
         "--notes",
         (
-            "Byte-preserving mirror assets for the official zai-org/GLM-5.3 "
-            f"revision {revision}. Large files are split into <1.9 GB parts. "
+            f"Byte-preserving mirror assets for the official {model_id} "
+            f"revision {revision}. Large files are split into range-safe parts. "
             "The official upstream LICENSE is included as a release asset. "
             "See MIRRORING.md and the uploaded manifests."
         ),
     )
 
 
-def ensure_upstream_license(tag: str, revision: str) -> None:
-    url = hf_hub_url(repo_id=MODEL_ID, filename="LICENSE", revision=revision)
+def ensure_upstream_license(
+    tag: str,
+    revision: str,
+    model_id: str,
+) -> None:
+    url = hf_hub_url(repo_id=model_id, filename="LICENSE", revision=revision)
     session = build_session()
     with session.get(url, stream=True, timeout=(30, 300)) as response:
         response.raise_for_status()
@@ -290,8 +294,9 @@ def stream_one(
     tag: str,
     expected_size: int | None,
     expected_sha256: str | None,
+    model_id: str,
 ) -> dict[str, Any]:
-    url = hf_hub_url(repo_id=MODEL_ID, filename=path, revision=revision)
+    url = hf_hub_url(repo_id=model_id, filename=path, revision=revision)
     full_hash = hashlib.sha256()
     total = 0
     parts: list[dict[str, Any]] = []
@@ -363,6 +368,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", type=int, required=True)
     parser.add_argument("--tag-prefix", default="upstream")
     parser.add_argument(
+        "--release-tag",
+        default=None,
+        help="Exact GitHub Release tag. Overrides --tag-prefix.",
+    )
+    parser.add_argument(
+        "--model-id",
+        default=DEFAULT_MODEL_ID,
+        help="Official Hugging Face model repository ID.",
+    )
+    parser.add_argument(
         "--revision",
         default=None,
         help="Pin an exact upstream revision SHA. Defaults to current upstream.",
@@ -384,6 +399,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    model_id = args.model_id
     if args.start < 0 or args.end < args.start:
         raise SystemExit("Invalid start/end range")
 
@@ -391,10 +407,10 @@ def main() -> None:
         if not args.revision:
             raise SystemExit("--revision is required when --path is used")
         revision = args.revision
-        tag = f"{args.tag_prefix}-{revision[:12]}"
-        ensure_release(tag, revision)
+        tag = args.release_tag or f"{args.tag_prefix}-{revision[:12]}"
+        ensure_release(tag, revision, model_id)
         if not args.skip_license:
-            ensure_upstream_license(tag, revision)
+            ensure_upstream_license(tag, revision, model_id)
 
         name = manifest_name(args.start, args.end, revision)
         if manifest_exists(tag, name):
@@ -414,9 +430,10 @@ def main() -> None:
             tag=tag,
             expected_size=args.expected_size,
             expected_sha256=args.expected_sha256 or None,
+            model_id=model_id,
         )
         manifest = {
-            "model_id": MODEL_ID,
+            "model_id": model_id,
             "revision": revision,
             "range": {"start": args.start, "end": args.end},
             "part_size": PART_SIZE,
@@ -433,7 +450,7 @@ def main() -> None:
 
     api = HfApi()
     info = api.model_info(
-        MODEL_ID,
+        model_id,
         revision=args.revision,
         files_metadata=True,
     )
@@ -452,10 +469,10 @@ def main() -> None:
             f"--end {args.end} is outside the available range 0..{len(siblings)-1}"
         )
 
-    tag = f"{args.tag_prefix}-{revision[:12]}"
-    ensure_release(tag, revision)
+    tag = args.release_tag or f"{args.tag_prefix}-{revision[:12]}"
+    ensure_release(tag, revision, model_id)
     if not args.skip_license:
-        ensure_upstream_license(tag, revision)
+        ensure_upstream_license(tag, revision, model_id)
 
     name = manifest_name(args.start, args.end, revision)
     if manifest_exists(tag, name):
@@ -482,11 +499,12 @@ def main() -> None:
                 tag=tag,
                 expected_size=getattr(sibling, "size", None),
                 expected_sha256=get_sha256(sibling),
+                model_id=model_id,
             )
         )
 
     manifest = {
-        "model_id": MODEL_ID,
+        "model_id": model_id,
         "revision": revision,
         "range": {"start": args.start, "end": args.end},
         "part_size": PART_SIZE,
