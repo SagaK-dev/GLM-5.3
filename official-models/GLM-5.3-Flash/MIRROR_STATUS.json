@@ -1,0 +1,18 @@
+{
+  "license_present": true,
+  "model_id": "zai-org/GLM-5.3-Flash",
+  "release_asset_count": 327,
+  "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
+  "sha256_checked_files": 63,
+  "status": "complete",
+  "upstream_file_count": 72,
+  "upstream_metadata_present": true,
+  "verification": {
+    "all_upstream_paths_present": true,
+    "release_part_sizes_match": true,
+    "upstream_sha256_checked_where_available": true
+  },
+  "verified_bytes": 328366172315,
+  "verified_file_count": 72,
+  "verified_part_count": 254
+}
