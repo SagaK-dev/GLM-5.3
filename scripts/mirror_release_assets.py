@@ -61,6 +61,10 @@ def build_session() -> requests.Session:
 
 def asset_name(path: str, part: int | None = None) -> str:
     safe = path.replace("/", "__")
+    # GitHub Release normalizes leading-dot asset names to "default.*".
+    # Prefix them deterministically so manifests remain portable and exact.
+    if safe.startswith("."):
+        safe = "dotfile" + safe
     if part is None:
         return safe
     return f"{safe}.part{part:04d}"
