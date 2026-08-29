@@ -27,6 +27,10 @@ This repository mirrors the unique official Z.AI / zai-org GLM-5.3-family open-s
 - Type: FP8 / mixed-tensor open-weight model repository
 - Canonical upstream: https://huggingface.co/zai-org/GLM-5.3-Flash
 - License: MIT
+- Mirror state: complete
+- Verified upstream revision: `04c4e9e95c5da8862dced7e5056455116f83a7e0`
+- Verified upstream files: 72 / 72
+- Verified bytes: 328366172315
 - Mirror layout: four segmented GitHub Releases
 - Completion record: `official-models/GLM-5.3-Flash/MIRROR_STATUS.json`
 
@@ -35,6 +39,10 @@ This repository mirrors the unique official Z.AI / zai-org GLM-5.3-family open-s
 - Type: BF16 open-weight model repository
 - Canonical upstream: https://huggingface.co/zai-org/GLM-5.3-Flash-BF16
 - License: MIT
+- Mirror state: complete
+- Verified upstream revision: `f12e0fe1f6b2ea274c11a569582edfd99d993c5e`
+- Verified upstream files: 130 / 130
+- Verified bytes: 642676400602
 - Mirror layout: four segmented GitHub Releases
 - Completion record: `official-models/GLM-5.3-Flash-BF16/MIRROR_STATUS.json`
 
