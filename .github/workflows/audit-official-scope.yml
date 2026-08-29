@@ -1,0 +1,108 @@
+name: Audit official GLM-5.3 scope
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".mirror/audit-official.trigger"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glm53-official-scope-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit dependencies
+        run: python -m pip install --upgrade huggingface_hub requests
+
+      - name: Audit current official upstream revisions
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          from huggingface_hub import HfApi
+
+          models = [
+              "zai-org/GLM-5.3",
+              "zai-org/GLM-5.3-BF16",
+              "zai-org/GLM-5.3-Flash",
+              "zai-org/GLM-5.3-Flash-BF16",
+          ]
+
+          api = HfApi()
+          result = {
+              "models": {},
+              "official_github": {},
+          }
+
+          for model_id in models:
+              info = api.model_info(model_id, files_metadata=True)
+              files = sorted(info.siblings or [], key=lambda x: x.rfilename)
+              total_bytes = sum(
+                  int(getattr(item, "size", 0) or 0)
+                  for item in files
+              )
+              result["models"][model_id] = {
+                  "revision": info.sha,
+                  "file_count": len(files),
+                  "reported_bytes": total_bytes,
+              }
+
+          remote = subprocess.check_output(
+              [
+                  "git",
+                  "ls-remote",
+                  "https://github.com/zai-org/GLM-5.git",
+                  "refs/heads/main",
+              ],
+              text=True,
+          ).strip().split()[0]
+
+          vendored_commit = (
+              Path("official-source/zai-org-GLM-5/UPSTREAM_COMMIT.txt")
+              .read_text(encoding="utf-8")
+              .strip()
+          )
+
+          result["official_github"] = {
+              "repository": "zai-org/GLM-5",
+              "current_main_commit": remote,
+              "vendored_commit": vendored_commit,
+              "matches_current_main": remote == vendored_commit,
+          }
+
+          Path("OFFICIAL_UPSTREAM_AUDIT.json").write_text(
+              json.dumps(result, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(result, indent=2, sort_keys=True))
+          PY
+
+      - name: Commit audit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add OFFICIAL_UPSTREAM_AUDIT.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Audit current official GLM-5.3 upstream scope"
+          git pull --rebase origin main
+          git push origin HEAD:main
