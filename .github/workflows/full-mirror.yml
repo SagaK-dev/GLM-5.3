@@ -91,7 +91,7 @@ jobs:
               }
               files.append(record)
 
-              if item.rfilename != "LICENSE" and index >= 150:
+              if item.rfilename != "LICENSE":
                   matrix.append(
                       {
                           "index": index,
@@ -235,7 +235,7 @@ jobs:
     needs:
       - prepare
       - mirror
-    if: ${{ false }}
+    if: ${{ always() && needs.mirror.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
