@@ -196,7 +196,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.matrix0) }}
     steps:
@@ -236,7 +236,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.matrix1) }}
     steps:
@@ -268,7 +268,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.matrix2) }}
     steps:
@@ -300,7 +300,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.matrix3) }}
     steps:
