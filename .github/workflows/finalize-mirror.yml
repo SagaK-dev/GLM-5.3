@@ -1,6 +1,11 @@
 name: Finalize GLM-5.3 mirror
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".mirror/finalize.trigger"
   workflow_run:
     workflows:
       - "Full GLM-5.3 mirror"
