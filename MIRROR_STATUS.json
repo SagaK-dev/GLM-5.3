@@ -1,0 +1,18 @@
+{
+  "license_present": true,
+  "model_id": "zai-org/GLM-5.3",
+  "release_asset_count": 729,
+  "revision": "935644c05e76fc198714f4cca449fd8b970ff6d7",
+  "sha256_checked_files": 143,
+  "status": "complete",
+  "upstream_file_count": 153,
+  "upstream_metadata_present": true,
+  "verification": {
+    "all_upstream_paths_present": true,
+    "release_part_sizes_match": true,
+    "upstream_sha256_checked_where_available": true
+  },
+  "verified_bytes": 755663688511,
+  "verified_file_count": 153,
+  "verified_part_count": 575
+}
