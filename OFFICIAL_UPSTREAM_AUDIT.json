@@ -1,0 +1,30 @@
+{
+  "models": {
+    "zai-org/GLM-5.3": {
+      "file_count": 153,
+      "reported_bytes": 755663688511,
+      "revision": "935644c05e76fc198714f4cca449fd8b970ff6d7"
+    },
+    "zai-org/GLM-5.3-BF16": {
+      "file_count": 291,
+      "reported_bytes": 1506693048081,
+      "revision": "304b8051cfb2b260b61ce0cbe330e02a98e73639"
+    },
+    "zai-org/GLM-5.3-Flash": {
+      "file_count": 72,
+      "reported_bytes": 328366172315,
+      "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0"
+    },
+    "zai-org/GLM-5.3-Flash-BF16": {
+      "file_count": 130,
+      "reported_bytes": 642676400602,
+      "revision": "f12e0fe1f6b2ea274c11a569582edfd99d993c5e"
+    }
+  },
+  "official_github": {
+    "current_main_commit": "414ad9eb891b05b5d7d51d573939bfe9ce538223",
+    "matches_current_main": true,
+    "repository": "zai-org/GLM-5",
+    "vendored_commit": "414ad9eb891b05b5d7d51d573939bfe9ce538223"
+  }
+}
