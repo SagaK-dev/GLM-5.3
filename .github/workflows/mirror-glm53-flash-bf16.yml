@@ -1,0 +1,407 @@
+name: Mirror official GLM-5.3-Flash-BF16
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".mirror/glm53-flash-bf16.trigger"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glm-5.3-flash-bf16-full-mirror
+  cancel-in-progress: true
+
+env:
+  MODEL_ID: "zai-org/GLM-5.3-Flash-BF16"
+  RELEASE_PREFIX: "glm-5.3-flash-bf16"
+  SEGMENT_COUNT: "4"
+  TARGET_DIR: "official-models/GLM-5.3-Flash-BF16"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.meta.outputs.revision }}
+      tag0: ${{ steps.meta.outputs.tag0 }}
+      tag1: ${{ steps.meta.outputs.tag1 }}
+      tag2: ${{ steps.meta.outputs.tag2 }}
+      tag3: ${{ steps.meta.outputs.tag3 }}
+      matrix0: ${{ steps.meta.outputs.matrix0 }}
+      matrix1: ${{ steps.meta.outputs.matrix1 }}
+      matrix2: ${{ steps.meta.outputs.matrix2 }}
+      matrix3: ${{ steps.meta.outputs.matrix3 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install metadata dependencies
+        run: python -m pip install --upgrade huggingface_hub
+
+      - name: Resolve exact upstream metadata and build four segments
+        id: meta
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import time
+          from pathlib import Path
+
+          from huggingface_hub import HfApi
+
+          model_id = os.environ["MODEL_ID"]
+          prefix = os.environ["RELEASE_PREFIX"]
+          segment_count = int(os.environ["SEGMENT_COUNT"])
+
+          info = None
+          last_error = None
+          api = HfApi()
+          for attempt in range(1, 9):
+              try:
+                  info = api.model_info(model_id, files_metadata=True)
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if attempt == 8:
+                      raise
+                  time.sleep(min(60, 2 ** attempt))
+
+          if info is None or not info.sha:
+              raise last_error or RuntimeError("Unable to resolve upstream model")
+
+          revision = info.sha
+          siblings = sorted(info.siblings or [], key=lambda x: x.rfilename)
+
+          def sha256_of(item):
+              lfs = getattr(item, "lfs", None)
+              if isinstance(lfs, dict):
+                  return lfs.get("sha256")
+              if lfs is not None:
+                  return getattr(lfs, "sha256", None)
+              return None
+
+          files = []
+          matrices = [[] for _ in range(segment_count)]
+          total = len(siblings)
+
+          for index, item in enumerate(siblings):
+              record = {
+                  "index": index,
+                  "path": item.rfilename,
+                  "size": getattr(item, "size", None),
+                  "sha256": sha256_of(item),
+              }
+              files.append(record)
+
+              if item.rfilename == "LICENSE":
+                  continue
+
+              segment = min(
+                  segment_count - 1,
+                  (index * segment_count) // max(total, 1),
+              )
+              tag = f"{prefix}-s{segment}-{revision[:12]}"
+              matrices[segment].append({
+                  "index": index,
+                  "path": item.rfilename,
+                  "size": "" if record["size"] is None else str(record["size"]),
+                  "sha256": record["sha256"] or "",
+                  "tag": tag,
+              })
+
+          metadata = {
+              "model_id": model_id,
+              "revision": revision,
+              "segment_count": segment_count,
+              "files": files,
+          }
+          Path("upstream-metadata.json").write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          print(f"revision={revision}")
+          for segment in range(segment_count):
+              tag = f"{prefix}-s{segment}-{revision[:12]}"
+              print(f"tag{segment}={tag}")
+              print(
+                  f"matrix{segment}="
+                  + json.dumps(matrices[segment], separators=(",", ":"))
+              )
+          PY
+
+      - name: Create segmented releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ steps.meta.outputs.revision }}
+        run: |
+          for segment in 0 1 2 3; do
+            var="tag$segment"
+            case "$segment" in
+              0) tag="${{ steps.meta.outputs.tag0 }}" ;;
+              1) tag="${{ steps.meta.outputs.tag1 }}" ;;
+              2) tag="${{ steps.meta.outputs.tag2 }}" ;;
+              3) tag="${{ steps.meta.outputs.tag3 }}" ;;
+            esac
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag"                 --target "${{ github.sha }}"                 --title "$MODEL_ID mirror segment $segment (${REVISION:0:12})"                 --notes "Byte-preserving official mirror of $MODEL_ID revision $REVISION, segment $segment of 4. See repository provenance and manifests."
+            fi
+          done
+
+      - name: Download official upstream LICENSE
+        env:
+          REVISION: ${{ steps.meta.outputs.revision }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          from huggingface_hub import hf_hub_download
+
+          for attempt in range(1, 9):
+              try:
+                  path = hf_hub_download(
+                      repo_id=os.environ["MODEL_ID"],
+                      filename="LICENSE",
+                      revision=os.environ["REVISION"],
+                      local_dir="license-download",
+                  )
+                  print(path)
+                  break
+              except Exception:
+                  if attempt == 8:
+                      raise
+                  time.sleep(min(60, 2 ** attempt))
+          PY
+          cp license-download/LICENSE LICENSE
+
+      - name: Upload license to every segment and metadata to segment zero
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in             "${{ steps.meta.outputs.tag0 }}"             "${{ steps.meta.outputs.tag1 }}"             "${{ steps.meta.outputs.tag2 }}"             "${{ steps.meta.outputs.tag3 }}"; do
+            gh release upload "$tag" LICENSE --clobber
+          done
+          gh release upload "${{ steps.meta.outputs.tag0 }}"             upstream-metadata.json --clobber
+
+  mirror0:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix0 != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix0) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade huggingface_hub requests
+      - name: Mirror file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          INDEX: ${{ matrix.index }}
+          FILE_PATH: ${{ matrix.path }}
+          EXPECTED_SIZE: ${{ matrix.size }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          RELEASE_TAG: ${{ matrix.tag }}
+        shell: bash
+        run: |
+          args=(
+            --model-id "$MODEL_ID"
+            --release-tag "$RELEASE_TAG"
+            --revision "$REVISION"
+            --skip-license
+            --start "$INDEX"
+            --end "$INDEX"
+            --path "$FILE_PATH"
+          )
+          if [[ -n "$EXPECTED_SIZE" ]]; then args+=(--expected-size "$EXPECTED_SIZE"); fi
+          if [[ -n "$EXPECTED_SHA256" ]]; then args+=(--expected-sha256 "$EXPECTED_SHA256"); fi
+          python scripts/mirror_release_assets.py "${args[@]}"
+
+  mirror1:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix1 != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix1) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade huggingface_hub requests
+      - name: Mirror file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          INDEX: ${{ matrix.index }}
+          FILE_PATH: ${{ matrix.path }}
+          EXPECTED_SIZE: ${{ matrix.size }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          RELEASE_TAG: ${{ matrix.tag }}
+        shell: bash
+        run: |
+          args=(--model-id "$MODEL_ID" --release-tag "$RELEASE_TAG" --revision "$REVISION" --skip-license --start "$INDEX" --end "$INDEX" --path "$FILE_PATH")
+          if [[ -n "$EXPECTED_SIZE" ]]; then args+=(--expected-size "$EXPECTED_SIZE"); fi
+          if [[ -n "$EXPECTED_SHA256" ]]; then args+=(--expected-sha256 "$EXPECTED_SHA256"); fi
+          python scripts/mirror_release_assets.py "${args[@]}"
+
+  mirror2:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix2 != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix2) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade huggingface_hub requests
+      - name: Mirror file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          INDEX: ${{ matrix.index }}
+          FILE_PATH: ${{ matrix.path }}
+          EXPECTED_SIZE: ${{ matrix.size }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          RELEASE_TAG: ${{ matrix.tag }}
+        shell: bash
+        run: |
+          args=(--model-id "$MODEL_ID" --release-tag "$RELEASE_TAG" --revision "$REVISION" --skip-license --start "$INDEX" --end "$INDEX" --path "$FILE_PATH")
+          if [[ -n "$EXPECTED_SIZE" ]]; then args+=(--expected-size "$EXPECTED_SIZE"); fi
+          if [[ -n "$EXPECTED_SHA256" ]]; then args+=(--expected-sha256 "$EXPECTED_SHA256"); fi
+          python scripts/mirror_release_assets.py "${args[@]}"
+
+  mirror3:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix3 != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix3) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade huggingface_hub requests
+      - name: Mirror file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          INDEX: ${{ matrix.index }}
+          FILE_PATH: ${{ matrix.path }}
+          EXPECTED_SIZE: ${{ matrix.size }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          RELEASE_TAG: ${{ matrix.tag }}
+        shell: bash
+        run: |
+          args=(--model-id "$MODEL_ID" --release-tag "$RELEASE_TAG" --revision "$REVISION" --skip-license --start "$INDEX" --end "$INDEX" --path "$FILE_PATH")
+          if [[ -n "$EXPECTED_SIZE" ]]; then args+=(--expected-size "$EXPECTED_SIZE"); fi
+          if [[ -n "$EXPECTED_SHA256" ]]; then args+=(--expected-sha256 "$EXPECTED_SHA256"); fi
+          python scripts/mirror_release_assets.py "${args[@]}"
+
+  verify:
+    needs: [prepare, mirror0, mirror1, mirror2, mirror3]
+    if: ${{ always() && needs.prepare.result == 'success' && (needs.mirror0.result == 'success' || needs.mirror0.result == 'skipped') && (needs.mirror1.result == 'success' || needs.mirror1.result == 'skipped') && (needs.mirror2.result == 'success' || needs.mirror2.result == 'skipped') && (needs.mirror3.result == 'success' || needs.mirror3.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download metadata and all manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG0: ${{ needs.prepare.outputs.tag0 }}
+          TAG1: ${{ needs.prepare.outputs.tag1 }}
+          TAG2: ${{ needs.prepare.outputs.tag2 }}
+          TAG3: ${{ needs.prepare.outputs.tag3 }}
+        run: |
+          rm -rf release-manifests
+          mkdir -p release-manifests
+          gh release download "$TAG0" --pattern "upstream-metadata.json" --dir .
+          for tag in "$TAG0" "$TAG1" "$TAG2" "$TAG3"; do
+            gh release download "$tag" --pattern "manifest-*.json" --dir release-manifests
+          done
+
+      - name: Inventory all segmented release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG0: ${{ needs.prepare.outputs.tag0 }}
+          TAG1: ${{ needs.prepare.outputs.tag1 }}
+          TAG2: ${{ needs.prepare.outputs.tag2 }}
+          TAG3: ${{ needs.prepare.outputs.tag3 }}
+        run: |
+          : > release-assets.tsv
+          for tag in "$TAG0" "$TAG1" "$TAG2" "$TAG3"; do
+            release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id')"
+            gh api --paginate               "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100"               --jq '.[] | [.name, .size] | @tsv'               >> release-assets.tsv
+          done
+
+      - name: Verify every upstream file, part size and SHA-256
+        run: |
+          python scripts/verify_release_mirror.py             --upstream-metadata upstream-metadata.json             --assets-tsv release-assets.tsv             --manifests-dir release-manifests             --output /tmp/MIRROR_STATUS.json
+
+      - name: Record verified completion
+        env:
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          TAG0: ${{ needs.prepare.outputs.tag0 }}
+          TAG1: ${{ needs.prepare.outputs.tag1 }}
+          TAG2: ${{ needs.prepare.outputs.tag2 }}
+          TAG3: ${{ needs.prepare.outputs.tag3 }}
+        run: |
+          mkdir -p "$TARGET_DIR"
+          cp /tmp/MIRROR_STATUS.json "$TARGET_DIR/MIRROR_STATUS.json"
+          cat > "$TARGET_DIR/MIRROR_COMPLETE.md" <<EOF
+          # zai-org/GLM-5.3-Flash-BF16 mirror complete
+
+          Upstream: zai-org/GLM-5.3-Flash-BF16
+
+          Revision: $REVISION
+
+          Release segments:
+          - $TAG0
+          - $TAG1
+          - $TAG2
+          - $TAG3
+
+          All upstream files were verified against the segmented GitHub Releases.
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$TARGET_DIR/MIRROR_STATUS.json" "$TARGET_DIR/MIRROR_COMPLETE.md"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record verified zai-org/GLM-5.3-Flash-BF16 mirror"
+          git pull --rebase origin main
+          git push origin HEAD:main
