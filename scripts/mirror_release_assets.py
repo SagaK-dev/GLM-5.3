@@ -75,8 +75,73 @@ def get_sha256(sibling: Any) -> str | None:
     return None
 
 
-def upload(tag: str, path: Path) -> None:
-    run_with_retry("gh", "release", "upload", tag, str(path), "--clobber")
+def release_asset_matches(tag: str, path: Path) -> bool:
+    result = subprocess.run(
+        [
+            "gh",
+            "release",
+            "view",
+            tag,
+            "--json",
+            "assets",
+            "--jq",
+            f'.assets[] | select(.name == "{path.name}") | .size',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+
+    expected = path.stat().st_size
+    for line in result.stdout.splitlines():
+        try:
+            if int(line.strip()) == expected:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def upload(tag: str, path: Path, attempts: int = 6) -> None:
+    last_error: subprocess.CalledProcessError | None = None
+
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(
+            ["gh", "release", "upload", tag, str(path), "--clobber"]
+        )
+        if result.returncode == 0:
+            return
+
+        last_error = subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+        )
+
+        # GitHub can occasionally return a transient error after the asset
+        # bytes were already committed. Treat a same-name/same-size asset as
+        # success instead of re-uploading gigabytes indefinitely.
+        if release_asset_matches(tag, path):
+            print(
+                f"Release asset {path.name} is already present with the "
+                "expected size; treating the upload as successful.",
+                flush=True,
+            )
+            return
+
+        if attempt == attempts:
+            raise last_error
+
+        delay = min(60, 2 ** attempt)
+        print(
+            f"Release upload failed (attempt {attempt}/{attempts}); "
+            f"retrying in {delay}s: {path.name}",
+            flush=True,
+        )
+        time.sleep(delay)
+
+    if last_error is not None:
+        raise last_error
 
 
 def ensure_release(tag: str, revision: str) -> None:
